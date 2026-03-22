@@ -8,31 +8,30 @@ from flask import Flask, jsonify, render_template_string
 from flask_cors import CORS
 import requests
 
-# ===== API Key 从环境变量读取（Railway 上设置，安全！）=====
 API_KEY    = os.environ.get("OKX_API_KEY", "")
 SECRET_KEY = os.environ.get("OKX_SECRET_KEY", "")
 PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
 
 BASE_URL   = "https://www.okx.com"
 SYMBOL     = "BTC-USDT"
-GRID_LOW   = 82000
-GRID_HIGH  = 90000
+GRID_LOW   = 66000
+GRID_HIGH  = 73000
 GRID_COUNT = 10
-INIT_FUND  = 200
 
 app = Flask(__name__)
 CORS(app)
 
 state = {
-    "balance": INIT_FUND,
+    "balance": 0,
+    "initial_balance": 0,
     "pnl": 0.0,
     "trades": [],
     "price": 0,
     "wins": 0,
     "total_trades": 0,
-    "max_balance": INIT_FUND,
+    "max_balance": 0,
     "max_drawdown": 0.0,
-    "pnl_history": [INIT_FUND],
+    "pnl_history": [],
     "grids": [],
     "log": [],
     "running": True,
@@ -78,7 +77,7 @@ def get_price():
         return price
     except:
         state["api_connected"] = False
-        return state["price"] or 86000
+        return state["price"] or 69000
 
 def get_balance():
     data = okx_get("/api/v5/account/balance?ccy=USDT")
@@ -92,9 +91,10 @@ def build_grids():
     return [{"price": round(GRID_LOW + i * step), "filled": False} for i in range(GRID_COUNT + 1)]
 
 def run_grid(price):
+    per_grid = state["initial_balance"] / GRID_COUNT if state["initial_balance"] > 0 else 20
     for g in state["grids"]:
         if not g["filled"] and price <= g["price"]:
-            qty = round(INIT_FUND / GRID_COUNT / price, 6)
+            qty = round(per_grid / price, 6)
             result = okx_post("/api/v5/trade/order", {
                 "instId": SYMBOL, "tdMode": "cash",
                 "side": "buy", "ordType": "market", "sz": str(qty)
@@ -102,9 +102,8 @@ def run_grid(price):
             g["filled"] = True
             pnl_est = round(g["price"] * 0.008 * qty, 4)
             add_trade("买入", price, qty, pnl_est, result)
-
         elif g["filled"] and price >= g["price"] * 1.008:
-            qty = round(INIT_FUND / GRID_COUNT / price, 6)
+            qty = round(per_grid / price, 6)
             result = okx_post("/api/v5/trade/order", {
                 "instId": SYMBOL, "tdMode": "cash",
                 "side": "sell", "ordType": "market", "sz": str(qty)
@@ -114,8 +113,9 @@ def run_grid(price):
             add_trade("卖出", price, qty, pnl_est, result)
 
 def add_trade(side, price, qty, pnl_val, api_result):
+    now = datetime.now(timezone(offset=__import__('datetime').timedelta(hours=8))).strftime("%H:%M:%S")
     state["trades"].insert(0, {
-        "time": datetime.now().strftime("%H:%M:%S"),
+        "time": now,
         "side": side,
         "price": round(price),
         "qty": qty,
@@ -123,18 +123,18 @@ def add_trade(side, price, qty, pnl_val, api_result):
     })
     if len(state["trades"]) > 20:
         state["trades"].pop()
-    state["pnl"] = round(state["pnl"] + pnl_val, 2)
     state["total_trades"] += 1
     if pnl_val > 0:
         state["wins"] += 1
     ok = "成功" if "data" in api_result else "失败"
-    state["log"].insert(0, f"[{datetime.now().strftime('%H:%M:%S')}] {side} {qty} BTC @ ${round(price):,} → {ok}")
+    state["log"].insert(0, f"[{now}] {side} {qty} BTC @ ${round(price):,} → {ok}")
     if len(state["log"]) > 50:
         state["log"].pop()
 
 def trading_loop():
     state["grids"] = build_grids()
-    state["log"].insert(0, f"[{datetime.now().strftime('%H:%M:%S')}] 网格策略启动，正在连接 OKX...")
+    state["log"].insert(0, f"启动中，正在连接 OKX 模拟盘...")
+    first_run = True
     while True:
         if state["running"]:
             try:
@@ -142,11 +142,19 @@ def trading_loop():
                 state["price"] = round(price)
                 bal = get_balance()
                 state["balance"] = round(bal, 2)
-                state["pnl"] = round(bal - INIT_FUND, 2)
-                if bal > state["max_balance"]:
+                if first_run and bal > 0:
+                    state["initial_balance"] = round(bal, 2)
+                    state["max_balance"] = round(bal, 2)
+                    state["pnl_history"] = [round(bal, 2)]
+                    first_run = False
+                    state["log"].insert(0, f"连接成功！账户余额 ${bal:.2f}，网格区间 ${GRID_LOW:,}–${GRID_HIGH:,}")
+                if state["initial_balance"] > 0:
+                    state["pnl"] = round(bal - state["initial_balance"], 2)
+                if bal > state["max_balance"] and state["max_balance"] > 0:
                     state["max_balance"] = bal
-                dd = (state["max_balance"] - bal) / state["max_balance"] * 100
-                state["max_drawdown"] = round(max(dd, 0), 2)
+                if state["max_balance"] > 0:
+                    dd = (state["max_balance"] - bal) / state["max_balance"] * 100
+                    state["max_drawdown"] = round(max(dd, 0), 2)
                 state["pnl_history"].append(round(bal, 2))
                 if len(state["pnl_history"]) > 60:
                     state["pnl_history"].pop(0)
@@ -163,7 +171,7 @@ HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,sans-serif}
 body{background:#f5f5f0;color:#1a1a1a;padding:16px}
-h2{font-size:17px;font-weight:500;margin-bottom:14px;display:flex;align-items:center;gap:10px}
+h2{font-size:17px;font-weight:500;margin-bottom:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
 @media(min-width:600px){.metrics{grid-template-columns:repeat(4,1fr)}}
 .metric{background:#fff;border-radius:10px;padding:12px 14px;border:0.5px solid #e0e0d8}
@@ -177,13 +185,12 @@ th{text-align:left;color:#888;font-weight:400;padding:3px 6px 7px;border-bottom:
 td{padding:5px 6px;border-bottom:0.5px solid #eee}
 .badge{font-size:11px;padding:3px 10px;border-radius:6px;font-weight:500}
 .live{background:#E1F5EE;color:#0F6E56}.offline{background:#f5f5f0;color:#888}
-.log{font-size:11px;color:#666;font-family:monospace;max-height:100px;overflow-y:auto;line-height:1.9}
-.price{font-size:13px;color:#888;font-weight:400}
+.log{font-size:11px;color:#666;font-family:monospace;max-height:120px;overflow-y:auto;line-height:1.9}
 </style></head>
 <body>
 <h2>OKX 模拟盘 · 网格策略
   <span id="badge" class="badge offline">连接中...</span>
-  <span class="price">BTC <span id="btcprice">—</span></span>
+  <span style="font-size:13px;color:#888;font-weight:400">BTC <span id="btcprice">—</span></span>
 </h2>
 <div class="metrics">
   <div class="metric"><div class="metric-label">账户余额 (USDT)</div><div class="metric-value" id="balance">—</div></div>
@@ -192,12 +199,12 @@ td{padding:5px 6px;border-bottom:0.5px solid #eee}
   <div class="metric"><div class="metric-label">最大回撤</div><div class="metric-value down" id="drawdown">—</div></div>
 </div>
 <div class="panel">
-  <h3>净值曲线</h3>
+  <h3>净值曲线（从启动起算）</h3>
   <div style="position:relative;height:140px"><canvas id="chart"></canvas></div>
 </div>
 <div class="panel">
   <h3>成交记录</h3>
-  <table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>盈亏</th></tr></thead>
+  <table><thead><tr><th>时间（北京）</th><th>方向</th><th>价格</th><th>盈亏</th></tr></thead>
   <tbody id="trades"></tbody></table>
 </div>
 <div class="panel">
@@ -215,25 +222,27 @@ async function refresh(){
     document.getElementById('pnl').className='metric-value '+(p>=0?'up':'down');
     document.getElementById('pnl').textContent=(p>=0?'+':'')+p.toFixed(2);
     const wr=d.total_trades>0?Math.round(d.wins/d.total_trades*100):0;
-    document.getElementById('winrate').textContent=wr+'%';
-    document.getElementById('drawdown').textContent=d.max_drawdown.toFixed(1)+'%';
+    document.getElementById('winrate').textContent=d.total_trades>0?wr+'%':'—';
+    document.getElementById('drawdown').textContent=d.max_drawdown.toFixed(2)+'%';
     const badge=document.getElementById('badge');
-    badge.textContent=d.api_connected?'实时运行':'模拟模式';
+    badge.textContent=d.api_connected?'实时运行':'连接中';
     badge.className='badge '+(d.api_connected?'live':'offline');
-    document.getElementById('trades').innerHTML=d.trades.map(t=>
+    document.getElementById('trades').innerHTML=d.trades.length?d.trades.map(t=>
       `<tr><td>${t.time}</td><td style="color:${t.side==='买入'?'#1D9E75':'#D85A30'}">${t.side}</td><td>$${t.price.toLocaleString()}</td><td style="color:${t.pnl>=0?'#1D9E75':'#D85A30'}">${t.pnl>=0?'+':''}${t.pnl}</td></tr>`
-    ).join('');
+    ).join(''):'<tr><td colspan="4" style="color:#aaa;text-align:center;padding:16px">等待交易信号...</td></tr>';
     document.getElementById('log').innerHTML=d.log.join('<br>')||'等待信号...';
-    if(!chart){
-      chart=new Chart(document.getElementById('chart'),{
-        type:'line',
-        data:{labels:d.pnl_history.map((_,i)=>i),datasets:[{data:d.pnl_history,borderColor:'#1D9E75',backgroundColor:'rgba(29,158,117,0.08)',borderWidth:1.5,pointRadius:0,fill:true,tension:0.3}]},
-        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{callback:v=>'$'+v.toFixed(0)}}}}
-      });
-    }else{
-      chart.data.labels=d.pnl_history.map((_,i)=>i);
-      chart.data.datasets[0].data=d.pnl_history;
-      chart.update('none');
+    if(d.pnl_history.length>1){
+      if(!chart){
+        chart=new Chart(document.getElementById('chart'),{
+          type:'line',
+          data:{labels:d.pnl_history.map((_,i)=>i),datasets:[{data:d.pnl_history,borderColor:'#1D9E75',backgroundColor:'rgba(29,158,117,0.08)',borderWidth:1.5,pointRadius:0,fill:true,tension:0.3}]},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{callback:v=>'$'+v.toFixed(0)}}}}
+        });
+      }else{
+        chart.data.labels=d.pnl_history.map((_,i)=>i);
+        chart.data.datasets[0].data=d.pnl_history;
+        chart.update('none');
+      }
     }
   }catch(e){}
 }
@@ -257,5 +266,5 @@ def toggle():
 if __name__ == "__main__":
     threading.Thread(target=trading_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
-    print(f"✅ 启动成功！访问: http://localhost:{port}")
+    print(f"启动成功！访问: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
