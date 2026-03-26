@@ -167,9 +167,10 @@ def get_price():
         return state["price"] or 69000
 
 def get_balance():
-    data = okx_get("/api/v5/account/balance?ccy=USDT")
+    # 读取账户总资产（USDT计价，含BTC等所有持仓折算）
+    data = okx_get("/api/v5/account/balance")
     try:
-        return float(data["data"][0]["details"][0]["availBal"])
+        return float(data["data"][0]["totalEq"])
     except:
         return state["balance"]
 
